@@ -3,7 +3,7 @@ import wfdb
 import pandas as pd
 import numpy as np
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import LabelEncoder, OneHotEncoder
+
 
 class ECGDataLoader:
     def __init__(self, data_dir, label_file, max_records=5000):
@@ -13,7 +13,10 @@ class ECGDataLoader:
         self.ecg_data = []
         self.labels = []
         self.labels_code = []
+        self.ages = []
+        self.genders = []
         self.record_names = []
+        self.feature_columns = []  # 用于存储每列的含义
 
     def load_labels(self):
         """加载 ConditionNames_SNOMED-CT.csv 中的标签信息"""
@@ -23,15 +26,41 @@ class ECGDataLoader:
         return label_map
 
     def extract_features(self, signal):
-        """从 ECG 信号中提取特征（这里是简单的时域特征）"""
-        # 简单的特征提取：均值、标准差、最大值和最小值
+        """从 ECG 信号中提取特征（包含详细列名）"""
+        lead_names = ['I', 'II', 'III', 'aVR', 'aVL', 'aVF', 'V1', 'V2', 'V3', 'V4', 'V5', 'V6']
+
+        # 计算统计特征
         mean_signal = np.mean(signal, axis=0)
         std_signal = np.std(signal, axis=0)
         max_signal = np.max(signal, axis=0)
         min_signal = np.min(signal, axis=0)
 
+        # 更新列名
+        self.feature_columns = []
+        for lead in lead_names:
+            self.feature_columns.extend([
+                f"{lead}_mean",
+                f"{lead}_std",
+                f"{lead}_max",
+                f"{lead}_min"
+            ])
+
         # 返回特征
         return np.concatenate([mean_signal, std_signal, max_signal, min_signal])
+
+    def parse_metadata(self, comments):
+        """解析元数据中的性别和年龄信息"""
+        age = None
+        gender = None
+        for comment in comments:
+            if comment.startswith("Age:"):
+                try:
+                    age = int(comment.split(":")[1].strip())
+                except ValueError:
+                    age = None
+            if comment.startswith("Sex:"):
+                gender = comment.split(":")[1].strip()
+        return age, gender
 
     def load_and_preprocess_data(self):
         """加载并处理数据"""
@@ -50,6 +79,9 @@ class ECGDataLoader:
                         record = wfdb.rdrecord(record_path)
                         ecg_signal = record.p_signal
 
+                        # 解析元数据中的性别和年龄
+                        age, gender = self.parse_metadata(record.comments)
+
                         # 假设 Dx 字段包含病症信息，映射到标签
                         dx_field = record.comments[2]  # 假设 Dx 信息位于评论的第 3 项
                         if dx_field:
@@ -67,45 +99,42 @@ class ECGDataLoader:
                         self.ecg_data.append(features)
                         self.labels.append(label)
                         self.labels_code.append(label_code)
+                        self.ages.append(age)
+                        self.genders.append(gender)
                         self.record_names.append(record_name)
 
                         count += 1
                         if count >= self.max_records:
                             # 返回为 NumPy 数组
-                            return np.array(self.ecg_data), np.array(self.labels), np.array(self.labels_code), self.record_names
+                            return (np.array(self.ecg_data), np.array(self.labels),
+                                    np.array(self.labels_code), np.array(self.ages),
+                                    np.array(self.genders), self.record_names)
                     except Exception as e:
                         print(f"Error loading {file}: {e}")
                         continue
 
         # Ensure the return is NumPy arrays
-        return np.array(self.ecg_data), np.array(self.labels),np.array(self.labels_code), self.record_names
+        return (np.array(self.ecg_data), np.array(self.labels),
+                np.array(self.labels_code), np.array(self.ages),
+                np.array(self.genders), self.record_names)
 
-    def preprocess_labels(self):
-        """将标签转化为整数编码或OneHot编码"""
-        le = LabelEncoder()
-        y_encoded = le.fit_transform(self.labels)
+    def save_to_csv(self, train_file='../data/train_data.csv', test_file='../data/test_data.csv', test_size=0.2):
+        """将预处理数据划分为训练集和测试集并保存为 CSV 文件"""
+        # 创建完整的 DataFrame
+        df = pd.DataFrame(self.ecg_data, columns=self.feature_columns)
+        df['label'] = self.labels
+        df['label_code'] = self.labels_code
+        df['age'] = self.ages
+        df['gender'] = self.genders
 
-        # OneHot编码
-        ohe = OneHotEncoder(sparse_output=False)
-        y_one_hot = ohe.fit_transform(y_encoded.reshape(-1, 1))
-
-        return y_encoded, y_one_hot, le
-
-    def get_data_split(self):
-        """划分训练集和测试集"""
-        X_train, X_test, y_train, y_test = train_test_split(self.ecg_data, self.labels, test_size=0.2, random_state=42)
-        return X_train, X_test, y_train, y_test
-
-    def save_to_csv(self, output_file='../data/preprocessed_data.csv'):
-        """将预处理数据保存为 CSV 文件"""
-        # 将特征和标签合并到一个 DataFrame 中
-        df = pd.DataFrame(self.ecg_data)
-        df['label'] = self.labels  # 添加标签列
-        df['label_code'] = self.labels_code  # 添加 label_code 列
+        # 划分训练集和测试集
+        train_df, test_df = train_test_split(df, test_size=test_size, random_state=42)
 
         # 保存为 CSV 文件
-        df.to_csv(output_file, index=False)
-        print(f"Data saved to {output_file}")
+        train_df.to_csv(train_file, index=False)
+        test_df.to_csv(test_file, index=False)
+        print(f"Training data saved to {train_file}")
+        print(f"Testing data saved to {test_file}")
 
 
 def main():
@@ -116,23 +145,19 @@ def main():
     # 创建 ECGDataLoader 实例
     ecg_loader = ECGDataLoader(data_dir, label_file)
 
-    # 加载并处理数据，接收四个返回值
-    ecg_data, labels, labels_code, record_names = ecg_loader.load_and_preprocess_data()
+    # 加载并处理数据
+    ecg_data, labels, labels_code, ages, genders, record_names = ecg_loader.load_and_preprocess_data()
 
     # 打印数据的基本信息
     print(f"Loaded {len(ecg_data)} ECG records.")
     print(f"Sample features: {ecg_data[0]}")
     print(f"Sample label: {labels[0]}")
-    print(f"Sample label code: {labels_code[0]}")  # 打印label_code
+    print(f"Sample label code: {labels_code[0]}")
+    print(f"Sample age: {ages[0]}")
+    print(f"Sample gender: {genders[0]}")
 
-    # 标签处理：编码标签
-    y_encoded, y_one_hot, label_encoder = ecg_loader.preprocess_labels()
-
-    # 数据划分
-    X_train, X_test, y_train, y_test = ecg_loader.get_data_split()
-
-    # 将数据保存为 CSV 文件
-    ecg_loader.save_to_csv('../data/preprocessed_data.csv')
+    # 划分并保存数据
+    ecg_loader.save_to_csv('../data/train_data.csv', '../data/test_data.csv')
 
 
 if __name__ == "__main__":
